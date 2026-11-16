@@ -1,0 +1,220 @@
+{
+	"ID": "20230506210010-houyyvy",
+	"Spec": "2",
+	"Type": "NodeDocument",
+	"Properties": {
+		"id": "20230506210010-houyyvy",
+		"title": "插件",
+		"type": "doc",
+		"updated": "20261109164000"
+	},
+	"Children": [
+		{
+			"ID": "20230506210021-udp6q1j",
+			"Type": "NodeHeading",
+			"HeadingLevel": 2,
+			"Properties": {
+				"id": "20230506210021-udp6q1j",
+				"updated": "20261024160716"
+			},
+			"Children": [
+				{
+					"Type": "NodeText",
+					"Data": "概述"
+				}
+			]
+		},
+		{
+			"ID": "20230506210021-1ngx24g",
+			"Type": "NodeParagraph",
+			"Properties": {
+				"id": "20230506210021-1ngx24g",
+				"updated": "20261024160716"
+			},
+			"Children": [
+				{
+					"Type": "NodeText",
+					"Data": "插件用于扩展思源的菜单、面板、编辑器交互等功能，也可以提供自定义内容块渲染。"
+				}
+			]
+		},
+		{
+			"ID": "20230512170814-itmsfoy",
+			"Type": "NodeParagraph",
+			"Properties": {
+				"id": "20230512170814-itmsfoy",
+				"updated": "20261024160716"
+			},
+			"Children": [
+				{
+					"Type": "NodeText",
+					"Data": "需要在文档中插入独立的小工具时，可使用 "
+				},
+				{
+					"Type": "NodeTextMark",
+					"TextMarkType": "block-ref",
+					"TextMarkBlockRefID": "20210824201257-cy7icrc",
+					"TextMarkBlockRefSubtype": "s",
+					"TextMarkTextContent": "挂件"
+				},
+				{
+					"Type": "NodeText",
+					"Data": "；需要与思源的界面和操作流程集成时，可选择相应插件。"
+				}
+			]
+		},
+		{
+			"ID": "20230506210021-04aesus",
+			"Type": "NodeHeading",
+			"HeadingLevel": 2,
+			"Properties": {
+				"id": "20230506210021-04aesus",
+				"updated": "20261016191345"
+			},
+			"Children": [
+				{
+					"Type": "NodeText",
+					"Data": "使用方式"
+				}
+			]
+		},
+		{
+			"ID": "20230506210021-tk7w2m5",
+			"Type": "NodeParagraph",
+			"Properties": {
+				"id": "20230506210021-tk7w2m5",
+				"updated": "20261016191345"
+			},
+			"Children": [
+				{
+					"Type": "NodeText",
+					"Data": "插件通过插件集市安装，安装后插件将被放置到 "
+				},
+				{
+					"Type": "NodeTextMark",
+					"TextMarkType": "code",
+					"TextMarkTextContent": "工作空间/data/plugins/"
+				},
+				{
+					"Type": "NodeText",
+					"Data": "​ 文件夹下，你可以在 "
+				},
+				{
+					"Type": "NodeTextMark",
+					"TextMarkType": "kbd",
+					"TextMarkTextContent": "设置"
+				},
+				{
+					"Type": "NodeText",
+					"Data": "​"
+				},
+				{
+					"Type": "NodeText",
+					"Data": " - "
+				},
+				{
+					"Type": "NodeTextMark",
+					"TextMarkType": "kbd",
+					"TextMarkTextContent": "集市"
+				},
+				{
+					"Type": "NodeText",
+					"Data": "​"
+				},
+				{
+					"Type": "NodeText",
+					"Data": " - "
+				},
+				{
+					"Type": "NodeTextMark",
+					"TextMarkType": "kbd",
+					"TextMarkTextContent": "已下载"
+				},
+				{
+					"Type": "NodeText",
+					"Data": "​"
+				},
+				{
+					"Type": "NodeText",
+					"Data": " - "
+				},
+				{
+					"Type": "NodeTextMark",
+					"TextMarkType": "kbd",
+					"TextMarkTextContent": "插件"
+				},
+				{
+					"Type": "NodeText",
+					"Data": "​ 中启用或禁用插件。"
+				}
+			]
+		},
+		{
+			"ID": "20261109164000-5a0fd27",
+			"Type": "NodeParagraph",
+			"Properties": {
+				"id": "20261109164000-5a0fd27",
+				"updated": "20261109164000"
+			},
+			"Children": [
+				{
+					"Type": "NodeText",
+					"Data": "桌面端禁用插件后会保留其自定义页签，重启后也会保留。如果页签提示插件暂不可用，请启用插件，等待加载完成后点击「重试」。卸载插件会关闭能够明确确认归属的页签，并移除其关闭记录；无法确定归属的页签会保留。"
+				}
+			]
+		},
+		{
+			"ID": "20230506210021-f12gucj",
+			"Type": "NodeHeading",
+			"HeadingLevel": 2,
+			"Properties": {
+				"id": "20230506210021-f12gucj",
+				"updated": "20260809232000"
+			},
+			"Children": [
+				{
+					"Type": "NodeText",
+					"Data": "上架插件集市"
+				}
+			]
+		},
+		{
+			"ID": "20230506210021-jimdgxy",
+			"Type": "NodeParagraph",
+			"Properties": {
+				"id": "20230506210021-jimdgxy",
+				"updated": "20260809232000"
+			},
+			"Children": [
+				{
+					"Type": "NodeText",
+					"Data": "请参考"
+				},
+				{
+					"Type": "NodeTextMark",
+					"TextMarkType": "a",
+					"TextMarkAHref": "https://github.com/siyuan-note/bazaar",
+					"TextMarkTextContent": "社区集市仓库"
+				},
+				{
+					"Type": "NodeText",
+					"Data": "。"
+				}
+			]
+		},
+		{
+			"ID": "20261108053000-8towi1r",
+			"Type": "NodeParagraph",
+			"Properties": {
+				"id": "20261108053000-8towi1r",
+				"updated": "20261108053000"
+			},
+			"Children": [
+				{
+					"Type": "NodeText",
+					"Data": "在更新列表中，可以开启「跳过全部更新」，让指定包不参与全部更新。插件、主题、图标、模板和挂件均支持此设置，仍可手动单独更新，也可随时关闭开关。此偏好保存在当前工作空间配置中，不会跨设备同步。"
+				}
+			]
+		}
+	]
+}

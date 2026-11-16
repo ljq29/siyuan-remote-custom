@@ -1,0 +1,164 @@
+name: Custom Windows release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*-custom.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      GOPROXY: "https://goproxy.cn,direct"
+      GO111MODULE: "on"
+      CGO_ENABLED: "1"
+      GOOS: "windows"
+      GOARCH: "amd64"
+      CC: "gcc"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: kernel/go.mod
+          cache: false
+
+      - name: Set up UCRT64 GCC
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          path-type: inherit
+          install: p7zip mingw-w64-ucrt-x86_64-gcc
+
+      - name: Install repository pnpm version
+        run: npm install --global pnpm@12.6.0
+
+      - name: Install frontend dependencies
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Electron runtime
+        working-directory: app
+        run: pnpm run install:electron
+
+      - name: Lint frontend and Electron sources
+        working-directory: app
+        run: pnpm run lint
+
+      - name: Test custom remote features and affected upstream behavior
+        working-directory: app
+        run: >-
+          pnpm run test:focused
+          electron/remote/customRemote.test.js
+          electron/remote/remoteKernel.test.ts
+          electron/remoteWebviewBoundary.test.ts
+          electron/sshOpenSSH.test.js
+          electron/webviewGate.test.js
+          src/layout/remoteLatency.test.ts
+          src/command/nativeCatalog.test.ts
+          src/sync/syncGuide.dom.test.ts
+          tests/mainWindowLoading.test.js
+
+      - name: Test Go API contracts
+        working-directory: kernel
+        run: go test ./apicontract/...
+
+      - name: Build all frontend bundles
+        working-directory: app
+        run: pnpm run build
+
+      - name: Build Windows kernel
+        working-directory: kernel
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
+          if ($LASTEXITCODE -ne 0) { throw "goversioninfo install failed" }
+          $goBin = go env GOBIN
+          if (-not $goBin) { $goBin = Join-Path (go env GOPATH) "bin" }
+          & (Join-Path $goBin "goversioninfo.exe") -platform-specific=true -icon="resource/icon.ico" -manifest="resource/goversioninfo.exe.manifest"
+          if ($LASTEXITCODE -ne 0) { throw "goversioninfo generation failed" }
+          go build -tags "fts5 sqlcipher" -o ../app/kernel/SiYuan-Kernel.exe -ldflags "-s -w -X github.com/siyuan-note/siyuan/kernel/util.Mode=prod"
+          if ($LASTEXITCODE -ne 0) { throw "kernel build failed" }
+          Copy-Item ../app/elevator/elevator-amd64.exe ../app/kernel/elevator.exe -Force
+          & ../app/kernel/SiYuan-Kernel.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "kernel version check failed" }
+
+      - name: Build NSIS installer and portable directory
+        working-directory: app
+        run: pnpm run dist
+
+      - name: Verify and package release assets
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = (Get-Content app/package.json -Raw | ConvertFrom-Json).version
+          $output = "app/build-release"
+          $installer = Join-Path $output "siyuan-$version-win.exe"
+          $unpacked = Join-Path $output "win-unpacked"
+          $green = Join-Path $output "siyuan-$version-win-green.zip"
+          foreach ($required in @(
+              $installer,
+              "$unpacked/SiYuan.exe",
+              "$unpacked/resources/kernel/SiYuan-Kernel.exe",
+              "$unpacked/resources/app/electron-dist/main.js",
+              "$unpacked/resources/app/node_modules/ssh2",
+              "$unpacked/resources/app/node_modules/node-forge",
+              "$unpacked/resources/app/node_modules/node-pty/prebuilds/win32-x64/pty.node"
+          )) {
+              if (-not (Test-Path $required)) { throw "Missing release content: $required" }
+          }
+          Compress-Archive -Path "$unpacked/*" -DestinationPath $green -Force
+          $assets = @($installer, $green)
+          $checksums = $assets | ForEach-Object {
+              $hash = (Get-FileHash $_ -Algorithm SHA256).Hash.ToLowerInvariant()
+              "$hash  $(Split-Path $_ -Leaf)"
+          }
+          Set-Content -Path (Join-Path $output "SHA256SUMS.txt") -Value $checksums -Encoding ascii
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding ascii
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: siyuan-custom-windows-${{ steps.package.outputs.version }}
+          path: |
+            app/build-release/siyuan-*-win.exe
+            app/build-release/siyuan-*-win-green.zip
+            app/build-release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Create or update GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = "${{ github.ref_name }}"
+          $version = "${{ steps.package.outputs.version }}"
+          $assets = @(
+              "app/build-release/siyuan-$version-win.exe",
+              "app/build-release/siyuan-$version-win-green.zip",
+              "app/build-release/SHA256SUMS.txt"
+          )
+          gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) {
+              gh release upload $tag $assets --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+              gh release create $tag $assets --repo $env:GITHUB_REPOSITORY --title $tag --notes "Windows custom build: NSIS installer, portable ZIP, and SHA-256 checksums. Built by GitHub Actions from Node 24 and the Go version declared in kernel/go.mod."
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Release publication failed" }

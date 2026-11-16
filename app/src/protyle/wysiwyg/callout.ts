@@ -1,0 +1,116 @@
+import {mobileInputDialog} from "../../dialog/mobileInputDialog";
+import {transaction, turnsOneInto} from "./transaction";
+import {Constants} from "../../constants";
+import {focusByRange} from "../util/selectionOffsets";
+import {CALLOUT_PRESETS, ICalloutPreset} from "./calloutType";
+
+const turnBlockquoteIntoCallout = (blockElements: HTMLElement[], protyle: IProtyle,
+                                 callout: Pick<ICalloutPreset, "type" | "title" | "icon">) => {
+    if (blockElements.length !== 1 || blockElements[0].dataset.type !== "NodeBlockquote") {
+        return false;
+    }
+    const nodeElement = blockElements[0];
+    if (!protyle.disabled && protyle.wysiwyg.element.contains(nodeElement)) {
+        void turnsOneInto({protyle, nodeElement, id: nodeElement.dataset.nodeId, type: "Blockquote2Callout", callout});
+    }
+    return true;
+};
+
+export const updateCalloutType = (blockElements: HTMLElement[], protyle: IProtyle, preset: ICalloutPreset) => {
+    if (turnBlockquoteIntoCallout(blockElements, protyle, preset)) {
+        return;
+    }
+    const doOperations: IOperation[] = [];
+    const undoOperations: IOperation[] = [];
+    const ids = new Set<string>();
+    blockElements.forEach(item => {
+        const id = item.dataset.nodeId;
+        if (!id || ids.has(id) || item.dataset.type !== "NodeCallout") {
+            return;
+        }
+        ids.add(id);
+        const oldHTML = item.outerHTML;
+        const oldType = item.dataset.subtype || "";
+        const titleElement = item.querySelector<HTMLElement>(".callout-title");
+        const title = protyle.lute.BlockDOM2StdMd(titleElement.innerHTML).trim();
+        item.dataset.subtype = preset.type;
+        if (title.toLowerCase() === oldType.toLowerCase()) {
+            titleElement.textContent = preset.title;
+        }
+        item.querySelector<HTMLElement>(".callout-icon").textContent = preset.icon;
+        item.setAttribute(Constants.ATTRIBUTE_EDITING, "true");
+        doOperations.push({
+            id,
+            data: item.outerHTML,
+            action: "update",
+        });
+        undoOperations.push({
+            id,
+            data: oldHTML,
+            action: "update",
+        });
+    });
+    if (doOperations.length > 0) {
+        transaction(protyle, doOperations, undoOperations);
+    }
+};
+
+export const updateCustomCalloutType = (blockElements: HTMLElement[], protyle: IProtyle) => {
+    const range = getSelection().rangeCount > 0 ? getSelection().getRangeAt(0).cloneRange() : undefined;
+    const currentType = blockElements.every(item => item.dataset.subtype === blockElements[0].dataset.subtype) ?
+        blockElements[0].dataset.subtype : "";
+    mobileInputDialog({
+        title: `${window.siyuan.languages.callout} - ${window.siyuan.languages.custom}`,
+        value: currentType || "",
+        label: window.siyuan.languages.type,
+        destroyCallback() {
+            if (range && protyle.wysiwyg.element.contains(range.startContainer)) {
+                focusByRange(range);
+            }
+        },
+        onConfirm: (value, dialog) => {
+            const type = value.trim();
+            if (!type) {
+                return;
+            }
+            void dialog.runPending(async () => {
+                if (protyle.disabled || blockElements.some(item => !protyle.wysiwyg.element.contains(item))) {
+                    dialog.invalidate();
+                    return false;
+                }
+                if (blockElements.length === 1 && blockElements[0].dataset.type === "NodeBlockquote") {
+                    await turnsOneInto({protyle, nodeElement: blockElements[0], id: blockElements[0].dataset.nodeId,
+                        type: "Blockquote2Callout", callout: {...CALLOUT_PRESETS[0], type}, awaitUpdate: true});
+                    return true;
+                }
+                const doOperations: IOperation[] = [];
+                const undoOperations: IOperation[] = [];
+                const updates: HTMLElement[] = [];
+                const ids = new Set<string>();
+                blockElements.forEach(item => {
+                    const id = item.dataset.nodeId;
+                    if (!id || ids.has(id) || item.dataset.type !== "NodeCallout" || item.dataset.subtype === type) {
+                        return;
+                    }
+                    ids.add(id);
+                    const oldHTML = item.outerHTML;
+                    const draft = item.cloneNode(true) as HTMLElement;
+                    draft.dataset.subtype = type;
+                    draft.setAttribute(Constants.ATTRIBUTE_EDITING, "true");
+                    updates.push(item);
+                    doOperations.push({id, data: draft.outerHTML, action: "update"});
+                    undoOperations.push({id, data: oldHTML, action: "update"});
+                });
+                if (doOperations.length > 0) {
+                    await transaction(protyle, doOperations, undoOperations, {awaitResponse: true});
+                    updates.forEach(source => {
+                        if (!source.isConnected) return;
+                        source.dataset.subtype = type;
+                        source.setAttribute(Constants.ATTRIBUTE_EDITING, "true");
+                    });
+                }
+                return true;
+            });
+        },
+    });
+};

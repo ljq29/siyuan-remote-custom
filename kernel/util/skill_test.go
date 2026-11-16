@@ -1,0 +1,836 @@
+// SiYuan - https://github.com/siyuan-note/siyuan
+// Copyright (c) 2020-present, b3log.org
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
+package util
+
+import (
+	"archive/zip"
+	"bytes"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"os/user"
+	"path/filepath"
+	"reflect"
+	"runtime"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// touchSkillMd 在 root 下创建一个含 SKILL.md 的 skill 目录。
+func touchSkillMd(t *testing.T, parts ...string) {
+	t.Helper()
+	p := filepath.Join(parts...)
+	if err := os.MkdirAll(p, 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", p, err)
+	}
+	skillMd := filepath.Join(p, "SKILL.md")
+	if err := os.WriteFile(skillMd, []byte("---\nname: x\n---\nbody"), 0644); err != nil {
+		t.Fatalf("write %s: %v", skillMd, err)
+	}
+}
+
+// toSlashSet 把路径分隔符统一为 /，便于跨平台断言。
+func toSlashSet(ss []string) []string {
+	out := make([]string, len(ss))
+	for i, s := range ss {
+		out[i] = filepath.ToSlash(s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func setSkillTestRoots(t *testing.T) (workspaceRoot, userRoot string) {
+	t.Helper()
+	originalDataDir, originalHomeDir := DataDir, HomeDir
+	root := t.TempDir()
+	DataDir = filepath.Join(root, "workspace", "data")
+	HomeDir = filepath.Join(root, "home")
+	t.Cleanup(func() {
+		DataDir, HomeDir = originalDataDir, originalHomeDir
+	})
+	return SkillsDir(), UserSkillsDir()
+}
+
+func writeSkill(t *testing.T, root, id, name, description, body string) {
+	t.Helper()
+	dir := filepath.Join(root, id)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := "---\nname: " + name + "\ndescription: " + description + "\n---\n" + body
+	if err := os.WriteFile(filepath.Join(dir, "SKILL.md"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func writeSkillResource(t *testing.T, root, id, resource string, content []byte) {
+	t.Helper()
+	file := filepath.Join(root, id, filepath.FromSlash(resource))
+	if err := os.MkdirAll(filepath.Dir(file), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, content, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDiscoverSkillsUsesEnabledUserSkillsWithWorkspacePriority(t *testing.T) {
+	workspaceRoot, userRoot := setSkillTestRoots(t)
+	writeSkill(t, workspaceRoot, "workspace-shared", "Shared", "workspace description", "workspace body")
+	writeSkill(t, userRoot, "shared", "Shared", "user description", "user body")
+	writeSkill(t, userRoot, "external", "External", "external description", "external body")
+
+	if got := DiscoverSkills(nil); !reflect.DeepEqual(got, []SkillInfo{{Name: "Shared", Description: "workspace description"}}) {
+		t.Fatalf("DiscoverSkills(nil) = %#v", got)
+	}
+	want := []SkillInfo{
+		{Name: "Shared", Description: "workspace description"},
+		{Name: "External", Description: "external description"},
+	}
+	if got := DiscoverSkills([]string{"SHARED", "external"}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("DiscoverSkills(enabled) = %#v, want %#v", got, want)
+	}
+	shared, err := LoadSkill("shared", []string{"shared", "external"})
+	if err != nil || shared.Content != "workspace body" {
+		t.Fatalf("LoadSkill(shared) = %#v, %v", shared, err)
+	}
+	external, err := LoadSkill("External", []string{"external"})
+	if err != nil || external.Content != "external body" {
+		t.Fatalf("LoadSkill(external) = %#v, %v", external, err)
+	}
+}
+
+func TestDiscoverUserSkillsReportsState(t *testing.T) {
+	workspaceRoot, userRoot := setSkillTestRoots(t)
+	writeSkill(t, workspaceRoot, "workspace-shared", "Shared", "workspace description", "workspace body")
+	writeSkill(t, userRoot, "external", "External", "external description", "external body")
+	writeSkill(t, userRoot, "shared", "Shared", "user description", "user body")
+
+	want := []UserSkillInfo{
+		{ID: "external", Name: "External", Description: "external description", Enabled: true},
+		{ID: "shared", Name: "Shared", Description: "user description", Enabled: true, Shadowed: true},
+	}
+	if got := DiscoverUserSkills([]string{"external", "shared"}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("DiscoverUserSkills() = %#v, want %#v", got, want)
+	}
+}
+
+func denySkillSourceRead(t *testing.T, path string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		current, err := user.Current()
+		if err != nil {
+			t.Fatal(err)
+		}
+		sid := "*" + current.Uid
+		if output, err := exec.Command("icacls", path, "/deny", sid+":(R)").CombinedOutput(); err != nil {
+			t.Fatalf("deny read: %s: %v", output, err)
+		}
+		t.Cleanup(func() {
+			if output, err := exec.Command("icacls", path, "/remove:d", sid).CombinedOutput(); err != nil {
+				t.Errorf("restore read: %s: %v", output, err)
+			}
+		})
+	} else {
+		if err := os.Chmod(path, 0000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(path, 0644) })
+	}
+	if _, err := os.ReadFile(path); !os.IsPermission(err) {
+		t.Skipf("read permission cannot be denied in this environment: %v", err)
+	}
+}
+
+func TestDiscoverSkillsSkipsUnreadableSources(t *testing.T) {
+	workspaceRoot, userRoot := setSkillTestRoots(t)
+	for _, root := range []string{workspaceRoot, userRoot} {
+		writeSkill(t, root, "a-unreadable", "Unreadable", "description", "body")
+		writeSkill(t, root, "z-readable", "Readable", "description", "body")
+		denySkillSourceRead(t, filepath.Join(root, "a-unreadable", "SKILL.md"))
+		if got := readSkillRecords(root); len(got) != 1 || got[0].Info.Name != "Readable" {
+			t.Fatalf("readSkillRecords(%s) = %#v", root, got)
+		}
+	}
+	if got := DiscoverUserSkills([]string{"a-unreadable", "z-readable"}); len(got) != 1 || got[0].ID != "z-readable" {
+		t.Fatalf("DiscoverUserSkills() = %#v", got)
+	}
+	if loaded, err := LoadSkill("Readable", []string{"a-unreadable", "z-readable"}); err != nil || loaded.Content != "body" {
+		t.Fatalf("LoadSkill() = %#v, %v", loaded, err)
+	}
+}
+
+func TestInstallSkillsSkipsUnreadableSources(t *testing.T) {
+	workspaceRoot, _ := setSkillTestRoots(t)
+	root := t.TempDir()
+	writeSkill(t, root, "a-unreadable", "Unreadable", "description", "body")
+	writeSkill(t, root, "z-readable", "Readable", "description", "body")
+	denySkillSourceRead(t, filepath.Join(root, "a-unreadable", "SKILL.md"))
+	result, err := installSkillDirs([]string{"a-unreadable", "z-readable"}, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readSkillRecords(workspaceRoot); len(got) != 1 || got[0].Info.Name != "Readable" {
+		t.Fatalf("installed skills = %#v, result = %#v", got, result)
+	}
+}
+
+func TestUserSkillsAreReadOnlyAndRequireEnablement(t *testing.T) {
+	_, userRoot := setSkillTestRoots(t)
+	writeSkill(t, userRoot, "external", "External", "external description", "external body")
+
+	if _, err := ReadSkill("external", nil); err == nil {
+		t.Fatal("disabled user skill should not be readable")
+	}
+	content, err := ReadSkill("External", []string{"external"})
+	if err != nil || !strings.Contains(content, "external body") {
+		t.Fatalf("ReadSkill(enabled user skill) = %q, %v", content, err)
+	}
+	if err = RemoveSkill("External"); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("RemoveSkill(user skill) error = %v", err)
+	}
+	if err = RenameSkill("External", "renamed"); err == nil || !strings.Contains(err.Error(), "read-only") {
+		t.Fatalf("RenameSkill(user skill) error = %v", err)
+	}
+	if _, err = os.Stat(filepath.Join(userRoot, "external", "SKILL.md")); err != nil {
+		t.Fatalf("user skill changed: %v", err)
+	}
+}
+
+func TestDiscoverUserSkillsFollowsDirectorySymlinks(t *testing.T) {
+	_, userRoot := setSkillTestRoots(t)
+	targetRoot := filepath.Join(t.TempDir(), "targets")
+	writeSkill(t, targetRoot, "linked-target", "Linked", "linked description", "linked body")
+	if err := os.MkdirAll(userRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(targetRoot, "linked-target"), filepath.Join(userRoot, "linked")); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	want := []UserSkillInfo{{ID: "linked", Name: "Linked", Description: "linked description"}}
+	if got := DiscoverUserSkills(nil); !reflect.DeepEqual(got, want) {
+		t.Fatalf("DiscoverUserSkills(symlink) = %#v, want %#v", got, want)
+	}
+}
+
+func TestLoadSkillListsAndReadsBundledResources(t *testing.T) {
+	workspaceRoot, _ := setSkillTestRoots(t)
+	writeSkill(t, workspaceRoot, "skill-dir", "DisplayName", "description", "body {{vars.VALUE}}")
+	writeSkillResource(t, workspaceRoot, "skill-dir", "scripts/run.py", []byte("print('ok')\n"))
+	writeSkillResource(t, workspaceRoot, "skill-dir", "references/spec.md", []byte("{{vars.VALUE}}\n"))
+	writeSkillResource(t, workspaceRoot, "skill-dir", ".git/config", []byte("ignored"))
+	writeSkillResource(t, workspaceRoot, "skill-dir", ".venv/pyvenv.cfg", []byte("ignored"))
+
+	loaded, err := LoadSkill("DisplayName", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantResources := []string{"references/spec.md", "scripts/run.py"}
+	if loaded.Name != "DisplayName" || loaded.Content != "body {{vars.VALUE}}" ||
+		!reflect.DeepEqual(loaded.Resources, wantResources) || loaded.ResourcesTruncated {
+		t.Fatalf("LoadSkill(activation) = %#v", loaded)
+	}
+
+	resource, err := LoadSkill("skill-dir/references/./spec.md", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resource.Name != "skill-dir" || resource.ResourcePath != "references/spec.md" ||
+		resource.Content != "{{vars.VALUE}}\n" || len(resource.Resources) != 0 {
+		t.Fatalf("LoadSkill(resource) = %#v", resource)
+	}
+
+	explicitSkillMD, err := LoadSkill("skill-dir/SKILL.md", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicitSkillMD.ResourcePath != "" || !reflect.DeepEqual(explicitSkillMD.Resources, wantResources) {
+		t.Fatalf("LoadSkill(SKILL.md) = %#v", explicitSkillMD)
+	}
+}
+
+func TestLoadSkillReadsOnlyEnabledUserResources(t *testing.T) {
+	_, userRoot := setSkillTestRoots(t)
+	writeSkill(t, userRoot, "external", "External", "description", "user body")
+	writeSkillResource(t, userRoot, "external", "references/spec.md", []byte("user resource"))
+
+	if _, err := LoadSkill("External/references/spec.md", nil); err == nil {
+		t.Fatal("disabled user skill resource should not be readable")
+	}
+	loaded, err := LoadSkill("External/references/spec.md", []string{"external"})
+	if err != nil || loaded.Content != "user resource" {
+		t.Fatalf("LoadSkill(enabled user resource) = %#v, %v", loaded, err)
+	}
+}
+
+func TestLoadSkillRejectsUnsafeOrUnsupportedResources(t *testing.T) {
+	workspaceRoot, _ := setSkillTestRoots(t)
+	writeSkill(t, workspaceRoot, "safe", "safe", "description", "body")
+	writeSkillResource(t, workspaceRoot, "safe", "invalid-utf8.txt", []byte{0xd6, 0xd0, 0xce, 0xc4})
+	writeSkillResource(t, workspaceRoot, "safe", "limit.txt", bytes.Repeat([]byte("x"), maxSkillResourceBytes))
+	writeSkillResource(t, workspaceRoot, "safe", "large.txt", bytes.Repeat([]byte("x"), maxSkillResourceBytes+1))
+
+	for _, locator := range []string{
+		"safe/../outside.txt",
+		"safe/references/../../../outside.txt",
+		"safe//absolute.txt",
+		"safe/C:/absolute.txt",
+	} {
+		if _, err := LoadSkill(locator, nil); err == nil || !strings.Contains(err.Error(), "invalid skill resource path") {
+			t.Errorf("LoadSkill(%q) error = %v", locator, err)
+		}
+	}
+	if _, err := LoadSkill("safe/invalid-utf8.txt", nil); err == nil ||
+		!strings.Contains(err.Error(), "skill resource is not valid UTF-8") {
+		t.Fatalf("invalid UTF-8 resource error = %v", err)
+	}
+	atLimit, err := LoadSkill("safe/limit.txt", nil)
+	if err != nil || len(atLimit.Content) != maxSkillResourceBytes {
+		t.Fatalf("resource at size limit = %d bytes, %v", len(atLimit.Content), err)
+	}
+	if _, err = LoadSkill("safe/large.txt", nil); err == nil || !strings.Contains(err.Error(), "65536 byte limit") {
+		t.Fatalf("large resource error = %v", err)
+	}
+}
+
+func TestLoadSkillEnforcesResolvedSkillRoot(t *testing.T) {
+	workspaceRoot, _ := setSkillTestRoots(t)
+	externalRoot := t.TempDir()
+	writeSkill(t, externalRoot, "linked-target", "Linked", "description", "linked body")
+	writeSkillResource(t, externalRoot, "linked-target", "references/inside.md", []byte("inside"))
+	if err := os.MkdirAll(workspaceRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(externalRoot, "linked-target"), filepath.Join(workspaceRoot, "linked")); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+
+	loaded, err := LoadSkill("Linked/references/inside.md", nil)
+	if err != nil || loaded.Content != "inside" {
+		t.Fatalf("LoadSkill(resource in symlinked skill) = %#v, %v", loaded, err)
+	}
+
+	outside := filepath.Join(t.TempDir(), "outside.md")
+	if err = os.WriteFile(outside, []byte("outside"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	resourceLink := filepath.Join(externalRoot, "linked-target", "references", "outside.md")
+	if err = os.Symlink(outside, resourceLink); err != nil {
+		t.Skipf("resource symlinks are unavailable: %v", err)
+	}
+	if _, err = LoadSkill("Linked/references/outside.md", nil); err == nil ||
+		!strings.Contains(err.Error(), "escapes skill directory") {
+		t.Fatalf("symlink escape error = %v", err)
+	}
+}
+
+func TestLoadSkillCapsResourceManifest(t *testing.T) {
+	workspaceRoot, _ := setSkillTestRoots(t)
+	writeSkill(t, workspaceRoot, "many", "many", "description", "body")
+	for i := 0; i <= maxSkillResourceEntries; i++ {
+		writeSkillResource(t, workspaceRoot, "many", fmt.Sprintf("references/%03d.md", i), []byte("x"))
+	}
+
+	loaded, err := LoadSkill("many", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Resources) != maxSkillResourceEntries || !loaded.ResourcesTruncated {
+		t.Fatalf("resource cap = %d, truncated=%v", len(loaded.Resources), loaded.ResourcesTruncated)
+	}
+	if loaded.Resources[0] != "references/000.md" || loaded.Resources[len(loaded.Resources)-1] != "references/199.md" {
+		t.Fatalf("unexpected capped resources: first=%q last=%q", loaded.Resources[0], loaded.Resources[len(loaded.Resources)-1])
+	}
+}
+
+func TestLoadSkillCapsManifestTraversal(t *testing.T) {
+	workspaceRoot, _ := setSkillTestRoots(t)
+	writeSkill(t, workspaceRoot, "many-dirs", "many-dirs", "description", "body")
+	skillDir := filepath.Join(workspaceRoot, "many-dirs")
+	for i := range maxSkillResourceVisited {
+		if err := os.Mkdir(filepath.Join(skillDir, fmt.Sprintf("empty-%04d", i)), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	loaded, err := LoadSkill("many-dirs", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Resources) != 0 || !loaded.ResourcesTruncated {
+		t.Fatalf("manifest traversal cap = %d resources, truncated=%v", len(loaded.Resources), loaded.ResourcesTruncated)
+	}
+}
+
+// TestFindSkillDirsRootSkill 验证 SKILL.md 直接在解压根时识别为单个 skill（相对路径 "."）。
+func TestFindSkillDirsRootSkill(t *testing.T) {
+	root := t.TempDir()
+	touchSkillMd(t, root)
+	got := findSkillDirs(root)
+	want := []string{"."}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("findSkillDirs(root skill) = %v, want %v", got, want)
+	}
+}
+
+// TestFindSkillDirsWrappedSingle 验证 codeload 包裹的单 skill（<repo-name>/SKILL.md）。
+// 这是 owner/repo 简写最常见的场景，修复前会因"只在根找 skills/ 容器"而漏掉。
+func TestFindSkillDirsWrappedSingle(t *testing.T) {
+	root := t.TempDir()
+	touchSkillMd(t, root, "WeChatReading")
+	got := toSlashSet(findSkillDirs(root))
+	want := []string{"WeChatReading"}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("findSkillDirs(wrapped single) = %v, want %v", got, want)
+	}
+}
+
+// TestFindSkillDirsWrappedCollection 验证 codeload 包裹的集合仓库（<repo>/skills/<name>/SKILL.md）。
+// 修复前会完全找不到（根只有 repo 目录，其下才有 skills/）。
+func TestFindSkillDirsWrappedCollection(t *testing.T) {
+	root := t.TempDir()
+	touchSkillMd(t, root, "myrepo", "skills", "foo")
+	touchSkillMd(t, root, "myrepo", "skills", "bar")
+	got := toSlashSet(findSkillDirs(root))
+	want := []string{"myrepo/skills/bar", "myrepo/skills/foo"}
+	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("findSkillDirs(wrapped collection) = %v, want %v", got, want)
+	}
+}
+
+// TestFindSkillDirsCollectionNoWrap 验证无包裹的集合仓库（skills/<name>/SKILL.md）。
+func TestFindSkillDirsCollectionNoWrap(t *testing.T) {
+	root := t.TempDir()
+	touchSkillMd(t, root, "skills", "baz")
+	got := toSlashSet(findSkillDirs(root))
+	want := []string{"skills/baz"}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("findSkillDirs(collection no wrap) = %v, want %v", got, want)
+	}
+}
+
+// TestFindSkillDirsDoesNotDescendIntoSkillInternals 验证识别到 skill 后停止下钻，
+// 不会把 skill 内部的 references/、scripts/ 子目录误判为 skill。
+func TestFindSkillDirsDoesNotDescendIntoSkillInternals(t *testing.T) {
+	root := t.TempDir()
+	// skill5 自身有 SKILL.md，同时含 references/a.md、scripts/b.py
+	skillDir := filepath.Join(root, "skill5", "SKILL.md")
+	if err := os.MkdirAll(filepath.Join(root, "skill5", "references"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "skill5", "scripts"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skillDir, []byte("---\nname: x\n---"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "skill5", "references", "a.md"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "skill5", "scripts", "b.py"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := toSlashSet(findSkillDirs(root))
+	want := []string{"skill5"}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("should not descend into skill internals: got %v, want %v", got, want)
+	}
+}
+
+// TestFindSkillDirsNoneFound 验证没有 SKILL.md 时返回空切片。
+func TestFindSkillDirsNoneFound(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, "some", "dir"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if got := findSkillDirs(root); len(got) != 0 {
+		t.Fatalf("findSkillDirs(no skill) = %v, want empty", got)
+	}
+}
+
+// TestFindSkillDirsSkipsVCSDirs 验证跳过 .git/.github 等元数据目录，不做无意义下钻。
+func TestFindSkillDirsSkipsVCSDirs(t *testing.T) {
+	root := t.TempDir()
+	touchSkillMd(t, root, "real-skill")
+	// 构造 .github 目录（无 SKILL.md），确认不会因下钻它而出错或误判
+	if err := os.MkdirAll(filepath.Join(root, ".github", "workflows"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	got := toSlashSet(findSkillDirs(root))
+	want := []string{"real-skill"}
+	if len(got) != 1 || got[0] != want[0] {
+		t.Fatalf("findSkillDirs(skip vcs) = %v, want %v", got, want)
+	}
+}
+
+// urlCase 是 normalizeSkillURL 的表驱动用例。
+type urlCase struct {
+	name       string
+	in         string
+	wantURL    string // 期望的 downloadURL；空表示不校验精确值，改校验 isZip/branch
+	wantIsZip  bool
+	wantBranch string
+}
+
+// TestNormalizeSkillURL 验证各种输入形态归一化为正确的下载源。
+func TestNormalizeSkillURL(t *testing.T) {
+	cases := []urlCase{
+		// owner/repo 简写 → codeload main，失败回退 master
+		{name: "shorthand", in: "Tencent/WeChatReading", wantURL: "https://codeload.github.com/Tencent/WeChatReading/zip/refs/heads/main", wantIsZip: true, wantBranch: "main"},
+		// 整条 npx skills add 命令 → 提取出 owner/repo
+		{name: "npx command", in: "npx skills add Tencent/WeChatReading -g", wantURL: "https://codeload.github.com/Tencent/WeChatReading/zip/refs/heads/main", wantIsZip: true, wantBranch: "main"},
+		// 带 @ 版本的 skills 包名
+		{name: "npx scoped", in: "npx skills@latest add foo/bar", wantURL: "https://codeload.github.com/foo/bar/zip/refs/heads/main", wantIsZip: true, wantBranch: "main"},
+		// 完整 GitHub 仓库 URL → codeload main
+		{name: "full repo", in: "https://github.com/Tencent/WeChatReading", wantURL: "https://codeload.github.com/Tencent/WeChatReading/zip/refs/heads/main", wantIsZip: true, wantBranch: "main"},
+		// tree/<branch> → codeload 指定分支
+		{name: "tree branch", in: "https://github.com/foo/bar/tree/dev", wantURL: "https://codeload.github.com/foo/bar/zip/refs/heads/dev", wantIsZip: true, wantBranch: "dev"},
+		// tree/<branch>/<path> → 保留整个引用/路径，下载时确定边界
+		{name: "tree branch path", in: "https://github.com/foo/bar/tree/dev/skills/x", wantURL: "https://codeload.github.com/foo/bar/zip/refs/heads/dev", wantIsZip: true, wantBranch: "dev"},
+		// commit/<sha> → codeload zip/<sha>
+		{name: "commit sha", in: "https://github.com/foo/bar/commit/abc123", wantURL: "https://codeload.github.com/foo/bar/zip/abc123", wantIsZip: true},
+		// blob/<branch>/<path> → raw 直链（单文件）
+		{name: "blob file", in: "https://github.com/foo/bar/blob/main/SKILL.md", wantURL: "https://raw.githubusercontent.com/foo/bar/main/SKILL.md", wantIsZip: false},
+		// raw 直链 → 原样
+		{name: "raw direct", in: "https://raw.githubusercontent.com/foo/bar/main/skills/x/SKILL.md", wantURL: "https://raw.githubusercontent.com/foo/bar/main/skills/x/SKILL.md", wantIsZip: false},
+		// releases/download/<tag>/<asset>.zip → 原样，预判 zip
+		{name: "release zip", in: "https://github.com/foo/bar/releases/download/v1.0/skill.zip", wantURL: "https://github.com/foo/bar/releases/download/v1.0/skill.zip", wantIsZip: true},
+		// releases/download 但 asset 非 zip → 原样，不预判 zip（交由 Content-Type 判定）
+		{name: "release non-zip", in: "https://github.com/foo/bar/releases/download/v1.0/skill.tar.gz", wantURL: "https://github.com/foo/bar/releases/download/v1.0/skill.tar.gz", wantIsZip: false},
+		// 第三方直链 → 原样
+		{name: "third-party", in: "https://example.com/skill.zip", wantURL: "https://example.com/skill.zip"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := normalizeSkillURL(c.in)
+			if err != nil {
+				t.Fatalf("normalizeSkillURL(%q) error: %v", c.in, err)
+			}
+			if c.wantURL != "" && got.downloadURL != c.wantURL {
+				t.Errorf("downloadURL = %q, want %q", got.downloadURL, c.wantURL)
+			}
+			if got.isZip != c.wantIsZip {
+				t.Errorf("isZip = %v, want %v", got.isZip, c.wantIsZip)
+			}
+			if c.wantBranch != "" && got.branch != c.wantBranch {
+				t.Errorf("branch = %q, want %q", got.branch, c.wantBranch)
+			}
+			if strings.Contains(c.in, "/tree/") {
+				wantPath := strings.SplitN(c.in, "/tree/", 2)[1]
+				if got.treeRepo != "foo/bar" || got.treePath != wantPath {
+					t.Fatalf("tree source lost scope: %+v", got)
+				}
+			}
+		})
+	}
+}
+
+// TestNormalizeSkillURLOwnerRepoBoundary 验证 owner/repo 简写判定不会误伤普通文本。
+// 含点（域名）、含冒号、带 scheme 的都不应走简写分支。
+func TestNormalizeSkillURLOwnerRepoBoundary(t *testing.T) {
+	bad := []string{
+		"example.com",     // 不是 owner/repo
+		"a/b/c",           // 多于一个斜杠
+		"https://foo/bar", // 含 scheme（应走 URL 分支，但属于合法 URL 不报错）
+		"/abs/path",       // 绝对路径
+	}
+	for _, in := range bad {
+		// 这些输入要么报错，要么走 URL 分支；只要不 panic、不误判为 codeload 即可
+		got, err := normalizeSkillURL(in)
+		if err != nil {
+			continue // 报错是可接受的
+		}
+		// 不应被误判为 codeload.github.com（只有 owner/repo 简写和 github.com URL 才会）
+		if in == "example.com" && strings.HasPrefix(got.downloadURL, "https://codeload.github.com/") {
+			t.Errorf("input %q should not map to codeload, got %s", in, got.downloadURL)
+		}
+	}
+}
+
+// TestNormalizeSkillURLOwnerRepoValid 确认合法 owner/repo 走 codeload 分支。
+func TestNormalizeSkillURLOwnerRepoValid(t *testing.T) {
+	good := []string{"a/b", "Tencent/WeChatReading", "user-1/my.repo.v2"}
+	for _, in := range good {
+		got, err := normalizeSkillURL(in)
+		if err != nil {
+			t.Errorf("normalizeSkillURL(%q) unexpected error: %v", in, err)
+			continue
+		}
+		if !got.isZip || got.branch != "main" {
+			t.Errorf("normalizeSkillURL(%q) = %+v, want codeload main zip", in, got)
+		}
+	}
+}
+
+// TestParseSkillFrontmatter 验证 frontmatter 解析提取 name/description，正文正确剥离。
+func TestParseSkillFrontmatter(t *testing.T) {
+	cases := []struct {
+		name     string
+		text     string
+		wantName string
+		wantDesc string
+		wantBody string
+	}{
+		{
+			name:     "standard",
+			text:     "---\nname: my-skill\ndescription: does X\n---\nbody line",
+			wantName: "my-skill",
+			wantDesc: "does X",
+			wantBody: "body line",
+		},
+		{
+			name:     "no frontmatter",
+			text:     "just body",
+			wantName: "",
+			wantDesc: "",
+			wantBody: "just body",
+		},
+		{
+			name:     "extra fields ignored",
+			text:     "---\nname: a\nversion: \"1.0\"\nauthor: me\ndescription: d\n---\nb",
+			wantName: "a",
+			wantDesc: "d",
+			wantBody: "b",
+		},
+		{
+			name:     "crlf line endings",
+			text:     "---\r\nname: cr\r\ndescription: crlf\r\n---\r\nbody",
+			wantName: "cr",
+			wantDesc: "crlf",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fm, body := parseSkillFrontmatter(c.text)
+			if fm["name"] != c.wantName {
+				t.Errorf("name = %q, want %q", fm["name"], c.wantName)
+			}
+			if fm["description"] != c.wantDesc {
+				t.Errorf("description = %q, want %q", fm["description"], c.wantDesc)
+			}
+			if c.wantBody != "" && body != c.wantBody {
+				t.Errorf("body = %q, want %q", body, c.wantBody)
+			}
+		})
+	}
+}
+
+// TestFirstLine 验证描述兜底提取首行并截断。
+func TestFirstLine(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", ""},
+		{"single", "single"},
+		{"first\nsecond", "first"},
+		{"first\r\nsecond", "first"},
+		{"   trimmed   ", "trimmed"},
+	}
+	for _, c := range cases {
+		if got := firstLine(c.in); got != c.want {
+			t.Errorf("firstLine(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
+// TestFirstLineTruncation 验证超长首行被截断为 200 字符 + "..."。
+func TestFirstLineTruncation(t *testing.T) {
+	long := make([]rune, 300)
+	for i := range long {
+		long[i] = 'x'
+	}
+	got := firstLine(string(long))
+	if len([]rune(got)) != 203 { // 200 + "..."
+		t.Errorf("firstLine(long) len = %d, want 203", len([]rune(got)))
+	}
+}
+
+// TestCheckSkillDownloadRedirect 验证重定向复查拦截内网目标、非 HTTP(S) 协议与超长跳转链。
+func TestCheckSkillDownloadRedirect(t *testing.T) {
+	tooMany := make([]*http.Request, 5)
+	cases := []struct {
+		name   string
+		rawURL string
+		via    []*http.Request
+		want   string
+	}{
+		{"loopback", "http://127.0.0.1:6806/api/system/version", nil, "prohibited"},
+		{"ipv6 loopback", "http://[::1]:6806/", nil, "prohibited"},
+		{"private", "http://10.0.0.5:8080/", nil, "prohibited"},
+		{"scheme", "file:///etc/passwd", nil, "scheme"},
+		{"too many redirects", "https://example.com/", tooMany, "too many redirects"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodGet, c.rawURL, nil)
+			if err != nil {
+				t.Fatalf("build request: %v", err)
+			}
+			err = checkSkillDownloadRedirect(req, c.via)
+			if err == nil || !strings.Contains(err.Error(), c.want) {
+				t.Fatalf("checkSkillDownloadRedirect(%s) error = %v, want containing %q", c.rawURL, err, c.want)
+			}
+		})
+	}
+}
+
+// TestFetchBytesRejectsRedirectToPrivateAddress 验证下载被 302 指向内网时不会跟随。
+func TestFetchBytesRejectsRedirectToPrivateAddress(t *testing.T) {
+	previousClient := ssrfSafeClient
+	t.Cleanup(func() { ssrfSafeClient = previousClient })
+	ssrfSafeClient = &http.Client{Transport: webFetchRoundTripper(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Hostname() == "127.0.0.1" {
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"text/plain"}},
+				Body: io.NopCloser(strings.NewReader("INTERNAL-SERVICE")), Request: req}, nil
+		}
+		return &http.Response{StatusCode: http.StatusFound,
+			Header: http.Header{"Location": {"http://127.0.0.1:6806/latest/meta-data/"}},
+			Body:   io.NopCloser(strings.NewReader("")), Request: req}, nil
+	})}
+
+	data, _, err := fetchBytes("https://example.com/skill.zip")
+	if err == nil {
+		t.Fatalf("redirect to private address followed, got %q", string(data))
+	}
+}
+
+// TestFetchBytesBlocksPrivateAddress 验证直连内网地址在拨号阶段被拒绝。
+func TestFetchBytesBlocksPrivateAddress(t *testing.T) {
+	t.Setenv("HTTP_PROXY", "")
+	t.Setenv("HTTPS_PROXY", "")
+	t.Setenv("NO_PROXY", "")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("INTERNAL-SERVICE"))
+	}))
+	defer srv.Close()
+
+	if _, _, err := fetchBytes(srv.URL + "/skill.md"); err == nil || !strings.Contains(err.Error(), "prohibited") {
+		t.Fatalf("private address download error = %v, want prohibited", err)
+	}
+}
+
+// TestDownloadSkillSourceRejectsPrivateHost 验证解析期的内网主机预检保持生效。
+func TestDownloadSkillSourceRejectsPrivateHost(t *testing.T) {
+	src := normalizedSkillSource{downloadURL: "http://127.0.0.1:6806/skill.md"}
+	if _, _, err := downloadSkillSource(src); err == nil || !strings.Contains(err.Error(), "prohibited") {
+		t.Fatalf("downloadSkillSource(private) error = %v, want prohibited", err)
+	}
+}
+
+func TestInstallGitHubTreeScope(t *testing.T) {
+	mockSkillPublicDNS(t)
+	var archive bytes.Buffer
+	w := zip.NewWriter(&archive)
+	for file, content := range map[string]string{
+		"repo-ref/SKILL.md":                   "---\nname: root\n---\nroot",
+		"repo-ref/skills/foo/SKILL.md":        "---\nname: foo\n---\nfoo",
+		"repo-ref/skills/foo/scripts/run.txt": "resource",
+		"repo-ref/skills/bar/SKILL.md":        "---\nname: bar\n---\nbar",
+		"repo-ref/skills/unnamed/SKILL.md":    "unnamed skill",
+		"repo-ref/skills-other/SKILL.md":      "---\nname: outside\n---\noutside",
+	} {
+		f, err := w.Create(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = io.WriteString(f, content); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, tree, ref string
+		status          int
+		want            []string
+	}{
+		{"single", "main/skills/foo", "main", 200, []string{"foo"}},
+		{"collection", "main/skills", "main", 200, []string{"bar", "foo", "unnamed"}},
+		{"slash branch", "feat/x/skills/foo", "feat/x", 200, []string{"foo"}},
+		{"branch root", "feat/x", "feat/x", 200, []string{"root"}},
+		{"tag", "v1/skills/foo", "v1", 200, []string{"foo"}},
+		{"commit", "abc123/skills/foo", "abc123", 200, []string{"foo"}},
+		{"missing directory", "main/missing", "main", 200, nil},
+		{"file instead of directory", "main/skills/foo/SKILL.md", "main", 200, nil},
+		{"missing ref", "absent/skills/foo", "main", 200, nil},
+		{"forbidden", "main/skills/foo", "main", 403, nil},
+		{"server failure", "main/skills/foo", "main", 500, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workspace, _ := setSkillTestRoots(t)
+			oldTemp := TempDir
+			TempDir = t.TempDir()
+			t.Cleanup(func() { TempDir = oldTemp })
+			oldClient := ssrfSafeClient
+			t.Cleanup(func() { ssrfSafeClient = oldClient })
+			var refs []string
+			ssrfSafeClient = &http.Client{Transport: webFetchRoundTripper(func(req *http.Request) (*http.Response, error) {
+				ref := strings.TrimPrefix(req.URL.Path, "/foo/bar/zip/")
+				refs = append(refs, ref)
+				status := tc.status
+				if status == 200 && ref != tc.ref {
+					status = 404
+				}
+				return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {"application/zip"}},
+					Body: io.NopCloser(bytes.NewReader(archive.Bytes())), Request: req}, nil
+			})}
+			result, err := InstallSkill("https://github.com/foo/bar/tree/" + tc.tree)
+			if tc.want == nil {
+				if err == nil {
+					t.Fatalf("unexpected success: %+v", result)
+				}
+				if entries, _ := os.ReadDir(workspace); len(entries) != 0 {
+					t.Fatalf("installed on failure: %v", entries)
+				}
+			} else {
+				if err != nil {
+					t.Fatal(err)
+				}
+				sort.Strings(result.Names)
+				if !reflect.DeepEqual(result.Names, tc.want) {
+					t.Fatalf("names = %v, want %v", result.Names, tc.want)
+				}
+				records, recordErr := readSkillInstallations()
+				if recordErr != nil {
+					t.Fatal(recordErr)
+				}
+				for _, name := range result.Names {
+					record := records.Skills[name]
+					if record.Ref != tc.ref || record.Repository != "https://github.com/foo/bar" || record.Subdirectory != strings.TrimPrefix(strings.TrimPrefix(tc.tree, tc.ref), "/") || record.SourceScope != "directory" {
+						t.Fatalf("incorrect source record: %+v", record)
+					}
+				}
+				entries, err := os.ReadDir(workspace)
+				if err != nil || len(entries) != len(tc.want) {
+					t.Fatalf("installed directories = %v, err %v", entries, err)
+				}
+				if tc.name == "single" {
+					data, err := os.ReadFile(filepath.Join(workspace, "foo", "scripts", "run.txt"))
+					if err != nil || string(data) != "resource" {
+						t.Fatalf("resource = %q, err %v", data, err)
+					}
+				}
+			}
+			if tc.status != 200 && len(refs) != 1 {
+				t.Fatalf("retried non-404 failure: %v", refs)
+			}
+			if tc.name == "slash branch" && !reflect.DeepEqual(refs, []string{"feat/x/skills/foo", "feat/x/skills", "feat/x"}) {
+				t.Fatalf("ref order: %v", refs)
+			}
+		})
+	}
+}
+
+func TestNormalizeGitHubTreeRejectsTraversal(t *testing.T) {
+	for _, tail := range []string{"main/../foo", "main/%2e%2e/foo", "main//foo", "main/C:/foo", "main/foo%5cbar"} {
+		if src, err := normalizeSkillURL("https://github.com/foo/bar/tree/" + tail); err == nil {
+			t.Fatalf("accepted unsafe tree: %+v", src)
+		}
+	}
+}

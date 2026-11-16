@@ -1,0 +1,65 @@
+{
+  // 最小必填项：远程内核地址与访问授权码
+  "remote": "https://siyuan.example.com",
+  "authCode": "替换为思源访问授权码",
+
+  // 可选：仅当确认两端功能兼容时设为 true；缺省 false
+  // 只忽略版本号差异，不忽略连接失败、超时或无效响应
+  "ignoreVersionMismatch": false,
+  "title": "我的远程笔记本",
+  "bootTimeout": 30,
+  "statusIndicator": true,
+
+  // 可选：SSH 跳板机。sshPassword 与 sshKey 二选一
+  "ssh": "user@192.168.1.10:22",
+  "sshPassword": "替换为跳板机密码",
+  // "sshKey": "C:/Users/your-name/.ssh/id_ed25519",
+  "target": "192.168.1.20:443",
+  "sshClient": "ssh2",
+  // "sshBridgePort": 0,
+
+  // 可选：在左侧 dock 中内嵌站点，经同一 SSH 隧道访问
+  "webviewSites": [
+    {
+      "name": "OpenWebUI",
+      "url": "https://openwebui.example.com",
+      "target": "192.168.1.20:443",
+      "icon": "iconBot",
+      // "listenPort": 18600,
+      // "insecure": false,
+      "auth": {
+        "username": "替换为站点账号",
+        "password": "替换为站点密码"
+        // "usernameSelector": "input[name=email]",
+        // "passwordSelector": "input[type=password]",
+        // "submitSelector": "button[type=submit]"
+      }
+    }
+  ],
+  "webviewGate": false,
+
+  // 可选：本机 HTTP 正向代理与一端口一站点入口
+  "httpProxy": {
+    "port": 18080,
+    "sites": [
+      {
+        "url": "https://gitea.example.com",
+        "target": "192.168.1.20:443",
+        "insecure": false,
+        "listenPort": 18081,
+        "rewrite": true
+      }
+    ]
+  },
+
+  // 可选：内嵌 SSH Server 与反向打洞；password 与 publicKeys 至少一种
+  "sshServer": {
+    "username": "root",
+    "password": "替换为本机 SSH 登录密码",
+    // "publicKeys": ["ssh-ed25519 AAAA... your-key"],
+    "shell": "pwsh",
+    "listenPort": 0,
+    "remoteHost": "127.0.0.1",
+    "remotePort": 2222
+  }
+}

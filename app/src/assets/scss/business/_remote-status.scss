@@ -1,0 +1,169 @@
+// 远程状态面板：分区块展示内核/SSH 隧道/UI 内代理/端口代理，行式布局，延迟按档位着色
+.sy__remoteStatus {
+  .remote-status__content {
+    overflow: auto;
+    padding: 0 12px 8px;
+    font-size: 12px;
+  }
+
+  .remote-status__chart-container {
+    flex-shrink: 0;
+  }
+
+  .remote-status__details {
+    min-height: 0;
+  }
+
+  .remote-status__trend {
+    flex-shrink: 0;
+  }
+
+  .remote-status__section {
+    margin-bottom: 12px;
+  }
+
+  .remote-status__section-title {
+    font-weight: 600;
+    color: var(--b3-theme-on-surface);
+    padding: 4px 0;
+    border-bottom: 1px solid var(--b3-border-color);
+    margin-bottom: 4px;
+  }
+
+  .remote-status__row {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    line-height: 22px;
+  }
+
+  .remote-status__label {
+    color: var(--b3-theme-on-surface-light);
+    flex-shrink: 0;
+  }
+
+  .remote-status__value {
+    text-align: right;
+    word-break: break-all;
+    user-select: text;
+  }
+
+  .remote-status__flags {
+    color: var(--b3-theme-on-surface-light);
+  }
+
+  .remote-status__empty {
+    color: var(--b3-theme-on-surface-light);
+    line-height: 22px;
+  }
+
+  .remote-status__legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+    margin: 8px 0 4px;
+
+    span::before {
+      content: "";
+      display: inline-block;
+      width: 12px;
+      border-top: 2px solid currentColor;
+      margin-right: 4px;
+      vertical-align: middle;
+    }
+  }
+
+  .remote-status__series--ping {
+    color: var(--b3-theme-primary);
+  }
+
+  .remote-status__series--ssh {
+    color: var(--b3-card-warning-color);
+  }
+
+  .remote-status__chart {
+    display: block;
+    width: 100%;
+    height: 160px;
+  }
+
+  .remote-status__readout {
+    min-height: 32px;
+    line-height: 16px;
+    color: var(--b3-theme-on-surface-light);
+    overflow-wrap: anywhere;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .remote-status__summary table {
+    width: 100%;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+
+    th, td {
+      padding: 2px 0;
+      text-align: right;
+      font-weight: normal;
+    }
+
+    th:first-child {
+      text-align: left;
+      color: var(--b3-theme-on-surface-light);
+    }
+  }
+}
+
+// 延迟分档着色：远程状态面板与底栏指示器共用
+.remote-status__latency {
+  font-variant-numeric: tabular-nums;
+
+  &--good {
+    color: var(--b3-card-success-color);
+  }
+
+  &--warn {
+    color: var(--b3-card-warning-color);
+  }
+
+  &--bad {
+    color: var(--b3-card-error-color);
+  }
+}
+
+// 底栏左侧的远程状态指示器（#statusRemote）：Ping 与 SSH 延迟常驻展示，点击唤起远程状态面板
+#statusRemote {
+  font-size: 12px;
+  white-space: nowrap;
+  user-select: none;
+
+  .remote-status__sep {
+    color: var(--b3-theme-on-surface-light);
+    margin: 0 4px;
+  }
+}
+
+// dock 左下「远程状态」图标的延迟角标，取内核 Ping 与 SSH 延迟中较差的一档着色
+.dock__item[data-type="remoteStatus"] {
+  position: relative;
+}
+
+.remote-status__dot {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+
+  &--good {
+    background-color: var(--b3-card-success-color);
+  }
+
+  &--warn {
+    background-color: var(--b3-card-warning-color);
+  }
+
+  &--bad {
+    background-color: var(--b3-card-error-color);
+  }
+}
