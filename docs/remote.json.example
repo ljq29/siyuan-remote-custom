@@ -15,6 +15,8 @@
   "sshPassword": "替换为跳板机密码",
   // "sshKey": "C:/Users/your-name/.ssh/id_ed25519",
   "target": "192.168.1.20:443",
+  // 可选：本机远程内核监听端口，缺省 6806
+  "forwardPort": 6806,
   "sshClient": "ssh2",
   // "sshBridgePort": 0,
 
