@@ -60,3 +60,38 @@ test("version mismatch ignore flag is opt-in", () => {
         assert.equal(remote.ignoreVersionMismatch, true);
     });
 });
+
+test("local forwards validate ports and apply loopback defaults", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "siyuan-custom-remote-"));
+    try {
+        fs.writeFileSync(path.join(dir, "remote.json"), JSON.stringify({
+            localForwards: [
+                {listenPort: "2222", targetPort: 22},
+                {listenHost: "0.0.0.0", listenPort: 2223, targetHost: "192.168.1.10", targetPort: "2022"},
+                {listenPort: 0, targetPort: 22},
+                {listenPort: 2224, targetPort: "22x"},
+                {listenPort: 2225, targetPort: 22, targetHost: ""},
+                null,
+            ],
+        }), "utf8");
+        const logs = [];
+        const remote = createCustomRemote({
+            app: {commandLine: {appendSwitch: () => {}}, getPath: () => dir},
+            target: undefined,
+            argError: undefined,
+            confDir: dir,
+            appVer: "3.8.10",
+            getArg: () => undefined,
+            writeLog: message => logs.push(message),
+        });
+        const status = await remote.getRemoteStatus();
+        assert.deepEqual(status.localForwards, [
+            {listenHost: "127.0.0.1", listenPort: 2222, targetHost: "127.0.0.1", targetPort: 22, listening: false},
+            {listenHost: "0.0.0.0", listenPort: 2223, targetHost: "192.168.1.10", targetPort: 2022, listening: false},
+        ]);
+        assert.equal(logs.filter(message => message.startsWith("local forward ignored:")).length, 4);
+        assert.ok(logs.includes("local forwards ignored: no SSH tunnel"));
+    } finally {
+        fs.rmSync(dir, {recursive: true, force: true});
+    }
+});

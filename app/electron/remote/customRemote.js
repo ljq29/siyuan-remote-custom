@@ -313,6 +313,35 @@ if (remoteConfig.httpProxy && typeof remoteConfig.httpProxy === "object") {
     }
 }
 
+// localForwards（仅 remote.json 配置）：在本机监听固定 TCP 端口，每条入站连接经 SSH forwardOut 到跳板机视角的
+// 目标地址；listenHost/targetHost 缺省均为 127.0.0.1，listenPort/targetPort 必填，非法项跳过且不影响其他规则
+const parseLocalForwardPort = (value) => {
+    const port = /^\d+$/.test(String(value)) ? Number(value) : 0;
+    return port > 0 && port < 65536 ? port : 0;
+};
+const localForwards = [];
+if (Array.isArray(remoteConfig.localForwards)) {
+    remoteConfig.localForwards.forEach((forward) => {
+        if (!forward || typeof forward !== "object") {
+            writeLog("local forward ignored: invalid entry " + JSON.stringify(forward));
+            return;
+        }
+        const listenPort = parseLocalForwardPort(forward.listenPort);
+        const targetPort = parseLocalForwardPort(forward.targetPort);
+        const listenHost = forward.listenHost === undefined ? "127.0.0.1" : forward.listenHost;
+        const targetHost = forward.targetHost === undefined ? "127.0.0.1" : forward.targetHost;
+        if (!listenPort || !targetPort) {
+            writeLog("local forward ignored: listenPort/targetPort requires a TCP port number");
+            return;
+        }
+        if (typeof listenHost !== "string" || !listenHost || typeof targetHost !== "string" || !targetHost) {
+            writeLog("local forward ignored: listenHost/targetHost requires a non-empty string");
+            return;
+        }
+        localForwards.push({listenHost, listenPort, targetHost, targetPort, listening: false});
+    });
+}
+
 // sshServer（仅 remote.json 配置）：隧道就绪后起内嵌 SSH Server 并经 forwardIn 反向打洞（等价 ssh -N -R），
 // 让跳板机侧的 remotePort 穿透回本机，外部可 SSH 进本机（shell/exec/SFTP）；username 必填，password 或
 // publicKeys（OpenSSH 公钥字符串数组）至少配一种，并存时任一通过即可，都没有则整体忽略并记
@@ -479,6 +508,32 @@ const createHttpProxyServer = (getSSHClient) => gNet.createServer((socket) => {
             pipeHttpThroughChannel(socket, channel, newHead, rest,
                 site && site.tls ? {servername: url.hostname, insecure: site.insecure} : null, requestLine);
         });
+    });
+});
+
+// 通用本地 TCP 转发器只持有监听端口，每条连接实时取当前 SSH 会话；隧道断开时拒绝新连接，重连后无需重建监听器
+const createLocalForwardServer = (getSSHClient, forward) => gNet.createServer((socket) => {
+    const client = getSSHClient();
+    if (!client) {
+        socket.destroy();
+        return;
+    }
+    let channel;
+    socket.on("error", () => {
+        if (channel) {
+            channel.destroy();
+        }
+    });
+    client.forwardOut("127.0.0.1", 0, forward.targetHost, forward.targetPort, (error, upstream) => {
+        if (error) {
+            writeLog("remote local forward failed [" + forward.listenHost + ":" + forward.listenPort + " -> " +
+                forward.targetHost + ":" + forward.targetPort + "]: " + error.message);
+            socket.destroy();
+            return;
+        }
+        channel = upstream;
+        channel.on("error", () => socket.destroy());
+        socket.pipe(channel).pipe(socket);
     });
 });
 
@@ -1209,6 +1264,19 @@ if (remoteKernelTarget && !remoteKernelArgError && remoteSSHArg !== undefined) {
                     // 提前挂上拒绝处理，避免站点转发器先于 IPC 调用失败时产生未处理的 Promise 拒绝
                     webviewSitesReadyPromise.catch(() => {});
                 }
+                localForwards.forEach((forward) => {
+                    const forwardServer = createLocalForwardServer(getActiveSSHClient, forward);
+                    forwardServer.on("error", (error) => {
+                        forward.listening = false;
+                        writeLog("remote local forward failed [" + forward.listenHost + ":" + forward.listenPort +
+                            "]: " + error.message);
+                    });
+                    forwardServer.listen(forward.listenPort, forward.listenHost, () => {
+                        forward.listening = true;
+                        writeLog("remote local forward listening [" + forward.listenHost + ":" + forward.listenPort +
+                            " -> " + forward.targetHost + ":" + forward.targetPort + "]");
+                    });
+                });
                 if (httpProxyConfig) {
                     // HTTP 代理复用同一 SSH 连接：每条入站连接按请求目标动态建 forwardOut 通道，监听失败只记日志，
                     // 不影响内核转发器与 webview 站点转发器；port 为 0 时不开正向代理，只保留各站点 listenPort 入口
@@ -1316,6 +1384,9 @@ if (webviewSites.length > 0 && !remoteSSHTunnelPromise) {
 if (httpProxyConfig && !remoteSSHTunnelPromise) {
     writeLog("http proxy ignored: no SSH tunnel");
 }
+if (localForwards.length > 0 && !remoteSSHTunnelPromise) {
+    writeLog("local forwards ignored: no SSH tunnel");
+}
 if (sshServerConfig && !remoteSSHTunnelPromise) {
     writeLog("ssh server ignored: no SSH tunnel");
 }
@@ -1344,6 +1415,13 @@ if (sshServerConfig && !remoteSSHTunnelPromise) {
             httpProxy: null,
             webviewSites: [],
             sshServer: null,
+            localForwards: localForwards.map((forward) => ({
+                listenHost: forward.listenHost,
+                listenPort: forward.listenPort,
+                targetHost: forward.targetHost,
+                targetPort: forward.targetPort,
+                listening: forward.listening,
+            })),
         };
         if (remoteSSHTunnelPromise) {
             status.ssh = {

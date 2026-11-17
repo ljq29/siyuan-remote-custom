@@ -52,6 +52,16 @@
     ]
   },
 
+  // 可选：本机 TCP 端口经 SSH 转发到跳板机视角的目标；下例将远端 SSH 映射到本机 2222
+  "localForwards": [
+    {
+      "listenHost": "127.0.0.1",
+      "listenPort": 2222,
+      "targetHost": "127.0.0.1",
+      "targetPort": 22
+    }
+  ],
+
   // 可选：内嵌 SSH Server 与反向打洞；password 与 publicKeys 至少一种
   "sshServer": {
     "username": "root",
